@@ -1,0 +1,17 @@
+[
+ {
+  "category_id": "597",
+  "category_name": "TURK ULUSAL",
+  "parent_id": 0
+ },
+ {
+  "category_id": 685,
+  "category_name": "BEIN SPORTS",
+  "parent_id": "0"
+ },
+ {
+  "category_id": "157",
+  "category_name": "TURK HABER",
+  "parent_id": 0
+ }
+]

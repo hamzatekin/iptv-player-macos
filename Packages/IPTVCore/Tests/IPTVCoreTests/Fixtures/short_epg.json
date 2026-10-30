@@ -1,0 +1,28 @@
+{
+ "epg_listings": [
+  {
+   "id": "1",
+   "epg_id": "7",
+   "title": "QW5hIEhhYmVy",
+   "lang": "tr",
+   "start": "2026-10-30 19:00:00",
+   "end": "2026-10-30 20:00:00",
+   "description": "R8O8bsO8biDDtm5lbWxpIGhhYmVybGVyaS4=",
+   "channel_id": "trt1.tr",
+   "start_timestamp": "1793386800",
+   "stop_timestamp": "1793390400"
+  },
+  {
+   "id": "2",
+   "epg_id": "7",
+   "title": "RGl6aTogR8O2bsO8bCBEYcSfxLE=",
+   "lang": "tr",
+   "start": "2026-10-30 20:00:00",
+   "end": "2026-10-30 22:00:00",
+   "description": "",
+   "channel_id": "trt1.tr",
+   "start_timestamp": 1793390400,
+   "stop_timestamp": 1793397600
+  }
+ ]
+}

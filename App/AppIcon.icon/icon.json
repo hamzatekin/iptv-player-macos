@@ -1,0 +1,28 @@
+{
+  "fill" : {
+    "automatic-gradient" : "extended-srgb:0.32000,0.26000,0.92000,1.00000"
+  },
+  "groups" : [
+    {
+      "layers" : [
+        {
+          "image-name" : "play.svg",
+          "name" : "play"
+        }
+      ]
+    },
+    {
+      "layers" : [
+        {
+          "image-name" : "screen.svg",
+          "name" : "screen"
+        }
+      ]
+    }
+  ],
+  "supported-platforms" : {
+    "squares" : [
+      "macOS"
+    ]
+  }
+}

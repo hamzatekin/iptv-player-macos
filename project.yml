@@ -1,0 +1,57 @@
+name: IPTVPlayer
+options:
+  bundleIdPrefix: app.iptvplayer
+  deploymentTarget:
+    macOS: "15.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+packages:
+  MPVKit:
+    url: https://github.com/mpvkit/MPVKit.git
+    exactVersion: 1.0.0
+  IPTVCore:
+    path: Packages/IPTVCore
+targets:
+  IPTVPlayer:
+    type: application
+    platform: macOS
+    sources: [App]
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: IPTV Player
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSApplicationCategoryType: public.app-category.entertainment
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+    entitlements:
+      path: App/IPTVPlayer.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.iptvplayer.mac
+        PRODUCT_NAME: IPTVPlayer
+        # App/AppIcon.icon, an Icon Composer document (edit it in Xcode's Icon Composer).
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        CODE_SIGN_STYLE: Manual
+        CODE_SIGN_IDENTITY: "-"
+        DEVELOPMENT_TEAM: ""
+        ENABLE_HARDENED_RUNTIME: NO
+    dependencies:
+      - package: MPVKit
+        product: MPVKit
+      - package: IPTVCore
+schemes:
+  IPTVPlayer:
+    build:
+      targets:
+        IPTVPlayer: all
+    run:
+      config: Debug
