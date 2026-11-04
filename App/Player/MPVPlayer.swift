@@ -56,6 +56,11 @@ final class MPVPlayer {
             ("gpu-api", "vulkan"),
             ("gpu-context", "moltenvk"),
             ("hwdec", "videotoolbox"),
+            // mpv 0.41.0's coreaudio output can't open mono on macOS 27 (error -50). When it fails it
+            // leaves a device listener pointing at freed memory: the next audio device change (headphones,
+            // AirPlay) crashes the app. mpv then falls back to avfoundation, which reads ~2 s ahead, so
+            // volume changes lag. Stereo always opens. Drop this once MPVKit ships an mpv after 0.41.0.
+            ("audio-channels", "stereo"),
             ("user-agent", userAgent),
             ("idle", "yes"),
             ("keep-open", "no"),

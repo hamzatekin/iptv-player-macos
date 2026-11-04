@@ -75,6 +75,11 @@ which is gitignored.
   resize. `MPVPlayer.drawableSizeChanged` forces a reconfigure by nudging `video-aspect-override`;
   without it the picture stays at its old size in a corner after full screen, mini mode or a move
   to another display.
+- Keep `audio-channels=stereo` while MPVKit ships mpv 0.41.0. On macOS 27 its coreaudio output fails
+  to open mono, and a failed open leaves a device listener on freed memory: the next audio device
+  change (headphones, AirPlay) crashes the app in `hotplug_cb`. mpv then plays through avfoundation,
+  which reads ~2 s ahead, so volume changes lag. Fixed upstream after 0.41.0 (mpv `af067b5ea`,
+  `c5d391adb`, `3dae21b1e`); drop the option once MPVKit ships an mpv with them.
 - Keep `MPVPlayer` the only thing that talks to libmpv. Keep the `MPVVideoView` instance alive for
   the app's lifetime: mpv is bound to its Metal layer at startup.
 - Core logic goes in `IPTVCore` with tests. The app target holds UI and wiring only.
