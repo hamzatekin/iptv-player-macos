@@ -88,4 +88,13 @@ import Testing
         try store.delete()
         #expect(store.load() == nil)
     }
+
+    /// A new password keeps the channels; a new server or username loads another account's.
+    @Test func sameAccountIgnoresPasswordOnly() {
+        let server = URL(string: "http://example.com:8080")!
+        let login = XtreamCredentials(server: server, username: "u", password: "p")
+        #expect(login.isSameAccount(as: XtreamCredentials(server: server, username: "u", password: "new")))
+        #expect(!login.isSameAccount(as: XtreamCredentials(server: server, username: "other", password: "p")))
+        #expect(!login.isSameAccount(as: XtreamCredentials(server: URL(string: "http://203.0.113.5:8080")!, username: "u", password: "p")))
+    }
 }

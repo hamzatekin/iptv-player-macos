@@ -10,6 +10,14 @@ enum PlaybackState: Equatable {
     case failed(String)
 }
 
+/// A stream that ended by itself: not by `stop`, and not replaced by another one.
+struct StreamEnd {
+    /// mpv reported an error, rather than the stream just ending.
+    let failed: Bool
+    /// How long it had shown video; nil when it never started.
+    let playedFor: TimeInterval?
+}
+
 /// The app's single mpv instance and the view it draws into.
 ///
 /// Created once for the app's lifetime: mpv is bound to the view's Metal layer at startup, so the
@@ -23,15 +31,25 @@ final class MPVPlayer {
     private(set) var isBuffering = false
     private(set) var isMuted = false
     private(set) var volume: Double = 100
+    /// The playing stream's video, audio and subtitle tracks.
+    private(set) var tracks: [MediaTrack] = []
 
     let videoView = MPVVideoView()
     /// Masked in mpv's log output, which includes the stream URLs and so the login.
     @ObservationIgnored var logSecrets: [String] = []
     /// When a stream last started showing video.
     @ObservationIgnored private(set) var lastPlayedAt: Date?
-    /// Called when a stream fails to play (state turns `.failed`).
-    @ObservationIgnored var onFailure: (() -> Void)?
+    /// Called when the stream fails (state turns `.failed`) or ends by itself (state turns `.idle`).
+    @ObservationIgnored var onStreamEnd: ((StreamEnd) -> Void)?
+    /// Called when the stream first shows video.
+    @ObservationIgnored var onStreamStart: (() -> Void)?
     @ObservationIgnored private var mpv: OpaquePointer?
+    /// What `reload` opens again. Nil after `stop`.
+    @ObservationIgnored private var currentURL: URL?
+    /// When the current stream first showed video.
+    @ObservationIgnored private var entryStartedAt: Date?
+    /// The audio and subtitles picked for the current stream (`aid`, `sid`), kept across `reload`.
+    @ObservationIgnored private var trackChoice: [String: String] = [:]
     /// mpv's playlist entry for the latest `play`. A replaced stream can still end in an error after
     /// `play` returns; that error must not count as the new stream failing.
     @ObservationIgnored private var currentEntryID: Int64?
@@ -79,6 +97,7 @@ final class MPVPlayer {
         mpv_observe_property(handle, 0, "paused-for-cache", MPV_FORMAT_FLAG)
         mpv_observe_property(handle, 0, "mute", MPV_FORMAT_FLAG)
         mpv_observe_property(handle, 0, "volume", MPV_FORMAT_DOUBLE)
+        mpv_observe_property(handle, 0, "track-list", MPV_FORMAT_NODE)
         videoView.onDrawableSizeChange = { [weak self] in self?.drawableSizeChanged() }
 
         // Called on an mpv thread. mpv API calls aren't allowed inside, so hop to the main thread
@@ -100,15 +119,71 @@ final class MPVPlayer {
 
     /// Replaces whatever is playing. mpv closes the old connection before opening the new one.
     func play(_ url: URL) {
+        currentURL = url
+        trackChoice = [:]
+        open()
+    }
+
+    /// Opens the current stream again, e.g. after it dropped, with the same audio and subtitles.
+    func reload() {
+        guard currentURL != nil else { return }
+        open()
+    }
+
+    private func open() {
+        guard let url = currentURL else { return }
         state = .loading
-        currentEntryID = loadFile(url.absoluteString)
+        entryStartedAt = nil
+        // Per-file options: mpv puts them back when the file ends, so a track picked on one channel
+        // doesn't carry over to the next one, which may not have that track.
+        let options = ["aid": trackChoice["aid"] ?? "auto", "sid": trackChoice["sid"] ?? "auto"]
+            .sorted { $0.key < $1.key }
+            .map { "\($0.key)=\($0.value)" }
+            .joined(separator: ",")
+        currentEntryID = loadFile(url.absoluteString, options: options)
         setFlag("pause", false)
     }
 
     /// Stops playback and closes the connection to the provider.
     func stop() {
+        currentURL = nil
+        entryStartedAt = nil
         command("stop")
         state = .idle
+    }
+
+    func selectAudio(_ trackID: Int) { selectTrack("aid", String(trackID)) }
+
+    /// Nil turns subtitles off.
+    func selectSubtitle(_ trackID: Int?) { selectTrack("sid", trackID.map(String.init) ?? "no") }
+
+    private func selectTrack(_ property: String, _ value: String) {
+        guard let mpv else { return }
+        trackChoice[property] = value
+        mpv_set_property_string(mpv, property, value)
+    }
+
+    /// Read on demand (the stream info panel asks once a second) rather than observed: bitrates and
+    /// the buffer change all the time.
+    func streamInfo() -> StreamInfo {
+        var info = StreamInfo()
+        guard state == .playing else { return info }
+        let video = tracks.first { $0.kind == .video && $0.isSelected }
+        let audio = tracks.first { $0.kind == .audio && $0.isSelected }
+        info.width = int("video-params/w")
+        info.height = int("video-params/h")
+        info.fps = double("container-fps") ?? double("estimated-vf-fps")
+        info.videoCodec = video?.codec
+        info.hardwareDecoder = string("hwdec-current")
+        info.videoBitrate = double("video-bitrate")
+        info.audioCodec = audio?.codec
+        info.audioChannels = int("audio-params/channel-count") ?? audio?.channelCount
+        info.sampleRate = int("audio-params/samplerate") ?? audio?.sampleRate
+        info.audioBitrate = double("audio-bitrate")
+        let drops = [int("frame-drop-count"), int("decoder-frame-drop-count")].compactMap { $0 }
+        info.droppedFrames = drops.isEmpty ? nil : drops.reduce(0, +)
+        info.bufferedSeconds = double("demuxer-cache-duration")
+        return info
     }
 
     func togglePause() { setFlag("pause", !isPaused) }
@@ -167,10 +242,11 @@ final class MPVPlayer {
         check(mpv_command(mpv, &cArgs))
     }
 
-    /// `loadfile <url> replace`, returning the new playlist entry's id.
-    private func loadFile(_ url: String) -> Int64? {
+    /// `loadfile <url> replace -1 <options>`, returning the new playlist entry's id. The index (-1)
+    /// is unused with `replace`, but mpv takes the options only after it.
+    private func loadFile(_ url: String, options: String) -> Int64? {
         guard let mpv else { return nil }
-        var cArgs: [UnsafePointer<CChar>?] = ["loadfile", url, "replace"].map { UnsafePointer(strdup($0)) }
+        var cArgs: [UnsafePointer<CChar>?] = ["loadfile", url, "replace", "-1", options].map { UnsafePointer(strdup($0)) }
         cArgs.append(nil)
         defer { cArgs.forEach { free(UnsafeMutablePointer(mutating: $0)) } }
         var result = mpv_node()
@@ -191,6 +267,45 @@ final class MPVPlayer {
         mpv_set_property(mpv, name, MPV_FORMAT_FLAG, &flag)
     }
 
+    private func int(_ name: String) -> Int? {
+        var value: Int64 = 0
+        guard let mpv, mpv_get_property(mpv, name, MPV_FORMAT_INT64, &value) >= 0 else { return nil }
+        return Int(value)
+    }
+
+    private func double(_ name: String) -> Double? {
+        var value = 0.0
+        guard let mpv, mpv_get_property(mpv, name, MPV_FORMAT_DOUBLE, &value) >= 0 else { return nil }
+        return value
+    }
+
+    private func string(_ name: String) -> String? {
+        guard let mpv, let value = mpv_get_property_string(mpv, name) else { return nil }
+        defer { mpv_free(value) }
+        return String(cString: value)
+    }
+
+    /// An mpv node as Swift values: integers as `Int64`, flags as `Bool`, maps as `[String: Any]`.
+    private static func value(of node: mpv_node) -> Any? {
+        switch node.format {
+        case MPV_FORMAT_STRING: return node.u.string.map { String(cString: $0) }
+        case MPV_FORMAT_FLAG: return node.u.flag != 0
+        case MPV_FORMAT_INT64: return node.u.int64
+        case MPV_FORMAT_DOUBLE: return node.u.double_
+        case MPV_FORMAT_NODE_ARRAY:
+            guard let list = node.u.list?.pointee else { return [Any]() }
+            return (0..<Int(list.num)).compactMap { value(of: list.values[$0]) }
+        case MPV_FORMAT_NODE_MAP:
+            guard let list = node.u.list?.pointee else { return [String: Any]() }
+            var map: [String: Any] = [:]
+            for i in 0..<Int(list.num) {
+                if let key = list.keys[i].map({ String(cString: $0) }) { map[key] = value(of: list.values[i]) }
+            }
+            return map
+        default: return nil
+        }
+    }
+
     private func drainEvents() {
         while let mpv, let event = mpv_wait_event(mpv, 0)?.pointee, event.event_id != MPV_EVENT_NONE {
             switch event.event_id {
@@ -199,18 +314,28 @@ final class MPVPlayer {
             case MPV_EVENT_PLAYBACK_RESTART:
                 state = .playing
                 lastPlayedAt = .now
+                if entryStartedAt == nil {
+                    entryStartedAt = .now
+                    onStreamStart?()
+                }
             case MPV_EVENT_END_FILE:
-                let endFile = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee
-                if let endFile, endFile.reason == MPV_END_FILE_REASON_ERROR {
-                    // An error from a stream that was already replaced: the new one is still opening.
-                    // Entry ids only grow, and a playlist URL's own entries come after the current one.
-                    if let currentEntryID, endFile.playlist_entry_id < currentEntryID { continue }
+                guard let endFile = event.data?.assumingMemoryBound(to: mpv_event_end_file.self).pointee else { continue }
+                // The end of a stream that was already replaced: the new one is still opening.
+                // Entry ids only grow, and a playlist URL's own entries come after the current one.
+                if let currentEntryID, endFile.playlist_entry_id < currentEntryID { continue }
+                let playedFor = entryStartedAt.map { Date.now.timeIntervalSince($0) }
+                switch endFile.reason {
+                case MPV_END_FILE_REASON_ERROR:
                     state = .failed(String(cString: mpv_error_string(endFile.error)))
-                    onFailure?()
-                } else if state != .loading {
-                    // A "stop" or the stream ending. A loadfile replace also ends the old file,
-                    // but by then state is already .loading for the new one.
+                    onStreamEnd?(StreamEnd(failed: true, playedFor: playedFor))
+                case MPV_END_FILE_REASON_EOF where currentURL != nil:
+                    // A live stream has no end: the server closed the connection.
                     state = .idle
+                    onStreamEnd?(StreamEnd(failed: false, playedFor: playedFor))
+                default:
+                    // A "stop", or a playlist URL handing over to its entries. A loadfile replace also
+                    // ends the old file, but by then state is already .loading for the new one.
+                    if state != .loading, endFile.reason != MPV_END_FILE_REASON_REDIRECT { state = .idle }
                 }
             case MPV_EVENT_PROPERTY_CHANGE:
                 if let property = event.data?.assumingMemoryBound(to: mpv_event_property.self).pointee {
@@ -237,6 +362,9 @@ final class MPVPlayer {
         case ("paused-for-cache", MPV_FORMAT_FLAG): isBuffering = data.load(as: Int32.self) != 0
         case ("mute", MPV_FORMAT_FLAG): isMuted = data.load(as: Int32.self) != 0
         case ("volume", MPV_FORMAT_DOUBLE): volume = data.load(as: Double.self)
+        case ("track-list", MPV_FORMAT_NODE):
+            let list = Self.value(of: data.load(as: mpv_node.self)) as? [Any] ?? []
+            tracks = MediaTrack.parse(mpvTrackList: list.compactMap { $0 as? [String: Any] })
         default: break
         }
     }

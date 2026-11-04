@@ -65,6 +65,31 @@ public enum ChannelBrowsing {
     }
 }
 
+/// The channel that was on before the current one, for Previous Channel (a TV remote's Last button).
+public struct ChannelHistory: Equatable, Sendable {
+    public struct Entry: Equatable, Sendable {
+        public let channelID: String
+        /// The variant that was playing, so going back gets the same quality.
+        public let streamID: Int
+
+        public init(channelID: String, streamID: Int) {
+            self.channelID = channelID
+            self.streamID = streamID
+        }
+    }
+
+    public private(set) var current: Entry?
+    public private(set) var previous: Entry?
+
+    public init() {}
+
+    /// Another quality of the same channel isn't a channel change: `previous` stays.
+    public mutating func played(_ entry: Entry) {
+        if let current, current.channelID != entry.channelID { previous = current }
+        current = entry
+    }
+}
+
 /// Now/next for one channel at a moment in time.
 public struct NowNext: Equatable, Sendable {
     public let now: EPGEntry?

@@ -70,6 +70,31 @@ import Testing
         #expect(SidebarSelection(rawValue: "junk") == nil)
     }
 
+    // MARK: Previous channel
+
+    @Test func previousIsTheChannelBeforeTheCurrentOne() {
+        var history = ChannelHistory()
+        history.played(.init(channelID: "a", streamID: 1))
+        #expect(history.previous == nil)
+        history.played(.init(channelID: "b", streamID: 2))
+        #expect(history.previous == .init(channelID: "a", streamID: 1))
+        // Going back swaps them, so pressing it again returns.
+        history.played(.init(channelID: "a", streamID: 1))
+        #expect(history.previous == .init(channelID: "b", streamID: 2))
+    }
+
+    @Test func anotherQualityOfTheSameChannelKeepsPrevious() {
+        var history = ChannelHistory()
+        history.played(.init(channelID: "a", streamID: 1))
+        history.played(.init(channelID: "b", streamID: 2))
+        history.played(.init(channelID: "b", streamID: 3))
+        #expect(history.previous == .init(channelID: "a", streamID: 1))
+        #expect(history.current == .init(channelID: "b", streamID: 3))
+        // Going back from b now returns to b's last quality.
+        history.played(.init(channelID: "a", streamID: 1))
+        #expect(history.previous == .init(channelID: "b", streamID: 3))
+    }
+
     // MARK: Now/next
 
     private let t0 = Date(timeIntervalSince1970: 1_000_000)

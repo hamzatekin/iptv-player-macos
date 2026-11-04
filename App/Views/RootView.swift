@@ -36,6 +36,7 @@ struct RootView: View {
 /// Shown after sign in until the first catalog arrives, or when that first load failed.
 struct LoadingView: View {
     @Environment(AppModel.self) private var model
+    @State private var showsAccount = false
 
     var body: some View {
         VStack(spacing: 14) {
@@ -52,6 +53,8 @@ struct LoadingView: View {
                 HStack {
                     Button("Retry") { Task { await model.refresh() } }
                         .keyboardShortcut(.defaultAction)
+                    // A typo in a just-edited login lands here; fix it without retyping everything.
+                    Button("Edit Login…") { showsAccount = true }
                     Button("Sign Out", role: .destructive) { model.signOut() }
                 }
             } else {
@@ -63,5 +66,8 @@ struct LoadingView: View {
         .padding(40)
         .frame(minWidth: 420, minHeight: 300)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showsAccount) {
+            AccountSheet().environment(model)
+        }
     }
 }

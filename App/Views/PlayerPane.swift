@@ -1,4 +1,5 @@
 import AppKit
+import IPTVCore
 import SwiftUI
 
 struct PlayerPane: View {
@@ -26,6 +27,13 @@ struct PlayerPane: View {
                 .opacity(model.player.state == .playing ? 0 : 1)
                 .allowsHitTesting(false)
             PlayerStatusOverlay()
+            if model.showsStreamInfo {
+                StreamInfoPanel(player: model.player)
+                    .padding(.top, 56)
+                    .padding(.leading, 16)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .allowsHitTesting(false)
+            }
             PlayerControls()
                 .opacity(controlsVisible ? 1 : 0)
                 .allowsHitTesting(controlsVisible)
@@ -65,6 +73,25 @@ private struct PlayerStatusOverlay: View {
     var body: some View {
         let player = model.player
         Group {
+            if model.isReconnecting, player.state != .playing {
+                VStack(spacing: 12) {
+                    ProgressView().controlSize(.large)
+                    Text("Reconnecting…").font(.title3)
+                    Text("The stream dropped. Attempt \(model.reconnectAttempt) of \(ReconnectPolicy.delays.count).")
+                        .font(.callout)
+                        .foregroundStyle(.white.opacity(0.7))
+                    Button("Stop") { model.stop() }
+                }
+            } else {
+                status(player)
+            }
+        }
+        .environment(\.colorScheme, .dark)
+        .foregroundStyle(.white)
+    }
+
+    private func status(_ player: MPVPlayer) -> some View {
+        Group {
             switch player.state {
             case .idle:
                 if model.playingChannel == nil {
@@ -98,8 +125,6 @@ private struct PlayerStatusOverlay: View {
                 }
             }
         }
-        .environment(\.colorScheme, .dark)
-        .foregroundStyle(.white)
     }
 
     private func message(_ title: String, systemImage: String, detail: String? = nil) -> some View {
@@ -114,5 +139,32 @@ private struct PlayerStatusOverlay: View {
         }
         .multilineTextAlignment(.center)
         .padding()
+    }
+}
+
+/// Resolution, codecs, bitrates and dropped frames, read from mpv once a second.
+private struct StreamInfoPanel: View {
+    let player: MPVPlayer
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { _ in
+            let rows = player.streamInfo().rows
+            Grid(alignment: .leading, horizontalSpacing: 12, verticalSpacing: 3) {
+                if rows.isEmpty {
+                    Text("No stream playing").foregroundStyle(.white.opacity(0.7))
+                }
+                ForEach(rows, id: \.label) { row in
+                    GridRow {
+                        Text(row.label).foregroundStyle(.white.opacity(0.7))
+                        Text(row.value).monospacedDigit()
+                    }
+                }
+            }
+            .font(.caption)
+            .padding(10)
+            .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 8))
+        }
+        .environment(\.colorScheme, .dark)
+        .foregroundStyle(.white)
     }
 }

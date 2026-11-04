@@ -1,6 +1,7 @@
 #!/bin/sh
 # Launches the debug build fresh (no window restoration: a bare binary launch after a force quit
-# can restore zero windows) with the .env login, and follows its log.
+# can restore zero windows) with the .env login (used only while no login is saved in the Keychain),
+# and follows its log.
 set -e
 cd "$(dirname "$0")/.."
 if [ -f .env ]; then set -a; . ./.env; set +a; fi

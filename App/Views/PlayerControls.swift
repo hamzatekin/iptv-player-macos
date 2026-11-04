@@ -1,7 +1,8 @@
 import IPTVCore
 import SwiftUI
 
-/// Top bar (channel name, quality) and bottom bar (now/next, volume, mini, full screen).
+/// Top bar (channel name, audio and subtitles, quality) and bottom bar (now/next, volume, previous
+/// channel, sleep timer, stream info, mini, full screen).
 struct PlayerControls: View {
     @Environment(AppModel.self) private var model
 
@@ -42,6 +43,18 @@ struct PlayerControls: View {
                 .font(.title3.bold())
                 .lineLimit(1)
             Spacer()
+            if model.player.hasTrackChoice {
+                Menu {
+                    Section("Audio") { AudioTrackItems(player: model.player) }
+                    Section("Subtitles") { SubtitleItems(player: model.player) }
+                } label: {
+                    Image(systemName: "captions.bubble")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help("Audio and Subtitles")
+            }
             if channel.variants.count > 1 {
                 Menu {
                     ForEach(channel.variants) { variant in
@@ -88,6 +101,25 @@ struct PlayerControls: View {
             .controlSize(.small)
             .accessibilityLabel("Volume")
             Spacer()
+            if let previous = model.previousChannel {
+                Button { model.playPrevious() } label: {
+                    Image(systemName: "arrow.uturn.backward")
+                }
+                .help("Back to \(previous.name) (⌘L)")
+            }
+            Menu {
+                SleepTimerItems(model: model)
+            } label: {
+                Image(systemName: model.sleepAt == nil ? "moon" : "moon.zzz.fill")
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(model.sleepAt.map { "Sleep timer: stops at \($0.formatted(date: .omitted, time: .shortened))" } ?? "Sleep Timer")
+            Button { model.showsStreamInfo.toggle() } label: {
+                Image(systemName: model.showsStreamInfo ? "info.circle.fill" : "info.circle")
+            }
+            .help(model.showsStreamInfo ? "Hide Stream Info (⌘I)" : "Show Stream Info (⌘I)")
             Button { model.window.toggleMini() } label: {
                 Image(systemName: model.window.isMini ? "arrow.up.left.and.arrow.down.right" : "pip.enter")
             }

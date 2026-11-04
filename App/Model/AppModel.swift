@@ -54,6 +54,14 @@ final class AppModel {
     /// Why the current stream failed, once the checks after a failure have finished.
     private(set) var playbackProblem: ProviderProblem?
     private(set) var isDiagnosing = false
+    /// The stream dropped and is being opened again (`ReconnectPolicy`).
+    private(set) var isReconnecting = false
+    /// Which reconnect this is, from 1.
+    private(set) var reconnectAttempt = 0
+    private(set) var history = ChannelHistory()
+    /// When the sleep timer stops playback; nil when it is off.
+    private(set) var sleepAt: Date?
+    var showsStreamInfo = false
 
     private(set) var epgCache: [Int: EPGCacheEntry] = [:]
 
@@ -79,6 +87,10 @@ final class AppModel {
     @ObservationIgnored private var refreshGeneration = 0
     @ObservationIgnored private var playTask: Task<Void, Never>?
     @ObservationIgnored private var diagnosisTask: Task<Void, Never>?
+    @ObservationIgnored private var reconnectPolicy = ReconnectPolicy()
+    @ObservationIgnored private var reconnectTask: Task<Void, Never>?
+    @ObservationIgnored private var sleepTask: Task<Void, Never>?
+    @ObservationIgnored private var nowPlaying: NowPlaying?
     @ObservationIgnored private var guideTimer: Task<Void, Never>?
     @ObservationIgnored private var epgQueue: [Int] = []
     @ObservationIgnored private var epgInFlight = Set<Int>()
@@ -89,12 +101,20 @@ final class AppModel {
 
     init() {
         player = MPVPlayer(userAgent: AppSettings.userAgent)
+        #if DEBUG
+        // A copy launched for testing signs in from .env and never touches the Keychain: reading the
+        // login another build saved can bring up a Keychain password prompt.
+        credentialStore = ProcessInfo.processInfo.environment["IPTV_TEST_INSTANCE"] == "1"
+            ? InMemoryCredentialStore() : KeychainCredentialStore()
+        #else
         credentialStore = KeychainCredentialStore()
+        #endif
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         cache = CatalogCache(directory: support.appending(path: "IPTVPlayer"))
         favorites = library.favorites
         selection = UserDefaults.standard.string(forKey: Self.selectionKey).flatMap(SidebarSelection.init) ?? .all
-        player.onFailure = { [weak self] in self?.diagnosePlaybackFailure() }
+        player.onStreamEnd = { [weak self] in self?.streamEnded($0) }
+        player.onStreamStart = { [weak self] in self?.isReconnecting = false }
     }
 
     // MARK: Launch
@@ -102,6 +122,7 @@ final class AppModel {
     func start() {
         guard !started else { return }
         started = true
+        nowPlaying = NowPlaying(model: self)
         guideTimer = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(60))
@@ -127,7 +148,9 @@ final class AppModel {
         }
     }
 
+    /// The saved login wins, so a login edited in the app sticks. Debug runs fall back to `.env`.
     private func launchCredentials() -> XtreamCredentials? {
+        if let saved = credentialStore.load() { return saved }
         #if DEBUG
         let env = ProcessInfo.processInfo.environment
         if let server = env["IPTV_SERVER"].flatMap(ServerAddress.normalize),
@@ -136,40 +159,57 @@ final class AppModel {
             return XtreamCredentials(server: server, username: username, password: password)
         }
         #endif
-        return credentialStore.load()
+        return nil
     }
 
     private func useCredentials(_ credentials: XtreamCredentials) {
         self.credentials = credentials
         client = XtreamClient(credentials: credentials, userAgent: AppSettings.userAgent)
-        player.logSecrets = [credentials.username, credentials.password]
+        // Keeps the old login hidden too: a stream started with it can still be logging its URL.
+        player.logSecrets = Array(Set(player.logSecrets + [credentials.username, credentials.password]))
     }
 
     // MARK: Sign in and out
 
-    func signIn(server: String, username: String, password: String) async {
-        guard !isSigningIn else { return }
+    struct LoginRejected: Error {
+        let message: String
+    }
+
+    private static let keychainSaveFailed = "Couldn't save the login to the Keychain. You will need to sign in again next time."
+
+    /// Asks the server whether this login works, so a typo is never saved.
+    private func check(server: String, username: String, password: String) async -> Result<XtreamCredentials, LoginRejected> {
         guard let url = ServerAddress.normalize(server) else {
-            loginError = "Enter a valid server address."
-            return
+            return .failure(LoginRejected(message: "Enter a valid server address."))
         }
         let credentials = XtreamCredentials(
             server: url, username: username.trimmingCharacters(in: .whitespacesAndNewlines), password: password
         )
+        do {
+            _ = try await XtreamClient(credentials: credentials, userAgent: AppSettings.userAgent).accountInfo()
+            return .success(credentials)
+        } catch {
+            return .failure(LoginRejected(message: Self.message(for: error)))
+        }
+    }
+
+    func signIn(server: String, username: String, password: String) async {
+        guard !isSigningIn else { return }
         isSigningIn = true
         loginError = nil
         defer { isSigningIn = false }
-        do {
-            _ = try await XtreamClient(credentials: credentials, userAgent: AppSettings.userAgent).accountInfo()
-        } catch {
-            loginError = Self.message(for: error)
+        let credentials: XtreamCredentials
+        switch await check(server: server, username: username, password: password) {
+        case .success(let checked): credentials = checked
+        case .failure(let rejected):
+            loginError = rejected.message
             return
         }
         notice = nil
         do {
             try credentialStore.save(credentials)
         } catch {
-            notice = "Couldn't save the login to the Keychain. You will need to sign in again next time."
+            notice = Self.keychainSaveFailed
         }
         useCredentials(credentials)
         loadError = nil
@@ -177,11 +217,49 @@ final class AppModel {
         await refresh()
     }
 
+    /// Saves a login edited in the account sheet, once the server accepts it and the Keychain has it.
+    /// Returns the message to show when it didn't work; then nothing changed. A new server or
+    /// username is another account: its channels replace the current ones.
+    func updateLogin(server: String, username: String, password: String) async -> String? {
+        let before = credentials
+        let checked: XtreamCredentials
+        switch await check(server: server, username: username, password: password) {
+        case .success(let value): checked = value
+        case .failure(let rejected): return rejected.message
+        }
+        // The sheet was closed, or the login changed (Settings window: sign out, sign in) while the
+        // server was answering. Applying this late answer would undo what the user did since.
+        guard !Task.isCancelled, let current = credentials, current == before else {
+            return "The login changed while this one was being checked."
+        }
+        guard checked != current else { return nil }
+        do {
+            try credentialStore.save(checked)
+        } catch {
+            return "Couldn't save the login to the Keychain, so nothing was changed. \(error)"
+        }
+        let sameAccount = checked.isSameAccount(as: current)
+        if !sameAccount {
+            clearAccount()
+            phase = .loading
+        }
+        useCredentials(checked)
+        // A new password is often the fix for a failed refresh, so try again with it.
+        Task { await refresh() }
+        return nil
+    }
+
     func signOut() {
+        clearAccount()
+        try? credentialStore.delete()
+        phase = .login
+    }
+
+    /// Drops everything that belongs to the signed-in account except the saved login.
+    private func clearAccount() {
         stop()
         playTask?.cancel()
         pendingPlay = nil
-        try? credentialStore.delete()
         try? FileManager.default.removeItem(at: cache.fileURL)
         // Builds before XtreamClient.defaultSession cached API responses here, keyed by URLs that
         // contain the password. Only channel logos are cached here now.
@@ -196,12 +274,12 @@ final class AppModel {
         categoryRows = []
         epgCache = [:]
         epgQueue = []
+        history = ChannelHistory()
         selectedChannelID = nil
         searchText = ""
         loadError = nil
         notice = nil
         loginError = nil
-        phase = .login
     }
 
     // MARK: Catalog
@@ -294,12 +372,16 @@ final class AppModel {
         guard let client else { return }
         let variant = variant ?? rememberedVariant(for: channel)
         selectedChannelID = channel.id
+        // While reconnecting, the provider can still count the dropped stream: that is us, not
+        // another device.
+        let ownsConnection = isReconnecting
+        cancelReconnect()
         playTask?.cancel()
         playTask = Task {
             // Starting from nothing: make sure we don't kick someone else off the one connection.
             switch player.state {
             case .idle, .failed:
-                if let info = try? await client.accountInfo(), info.activeConnections >= info.maxConnections {
+                if !ownsConnection, let info = try? await client.accountInfo(), info.activeConnections >= info.maxConnections {
                     guard !Task.isCancelled else { return }
                     pendingPlay = PendingPlay(channel: channel, variant: variant)
                     return
@@ -321,12 +403,23 @@ final class AppModel {
     private func begin(_ channel: Channel, _ variant: ChannelVariant) {
         guard let client else { return }
         clearDiagnosis()
+        cancelReconnect()
+        reconnectPolicy = ReconnectPolicy()
         player.play(client.liveStreamURL(streamID: variant.stream.id))
         playingChannelID = channel.id
         playingStreamID = variant.stream.id
+        history.played(.init(channelID: channel.id, streamID: variant.stream.id))
         library.lastChannelID = channel.id
         library.lastStreamID = variant.stream.id
         requestNowNext(for: channel)
+    }
+
+    /// The channel Previous Channel goes back to.
+    var previousChannel: Channel? { channel(id: history.previous?.channelID) }
+
+    func playPrevious() {
+        guard let previous = history.previous, let channel = channel(id: previous.channelID) else { return }
+        play(channel, variant: channel.variants.first { $0.stream.id == previous.streamID })
     }
 
     private func rememberedVariant(for channel: Channel) -> ChannelVariant {
@@ -334,6 +427,14 @@ final class AppModel {
               let variant = channel.variants.first(where: { $0.stream.id == streamID })
         else { return channel.defaultVariant }
         return variant
+    }
+
+    /// Pauses or resumes a stream, and restarts a channel that stopped by itself.
+    func togglePlayPause() {
+        switch player.state {
+        case .loading, .playing: player.togglePause()
+        case .idle, .failed: retry()
+        }
     }
 
     /// Replays the current channel and variant, e.g. after a failure.
@@ -345,9 +446,68 @@ final class AppModel {
     func stop() {
         playTask?.cancel()
         clearDiagnosis()
+        cancelReconnect()
+        setSleepTimer(nil)
         player.stop()
         playingChannelID = nil
         playingStreamID = nil
+    }
+
+    /// A stream that stopped by itself. One that had been playing is opened again a few times
+    /// (`ReconnectPolicy`); after that, or when it never started, a failure is diagnosed.
+    private func streamEnded(_ end: StreamEnd) {
+        reconnectTask?.cancel()
+        if let delay = reconnectPolicy.delayAfterStop(playedFor: end.playedFor) {
+            clearDiagnosis()
+            isReconnecting = true
+            reconnectAttempt = reconnectPolicy.attempts
+            reconnectTask = Task {
+                try? await Task.sleep(for: delay)
+                guard !Task.isCancelled else { return }
+                player.reload()
+            }
+            return
+        }
+        isReconnecting = false
+        if end.failed { diagnosePlaybackFailure() }
+    }
+
+    private func cancelReconnect() {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        isReconnecting = false
+    }
+
+    // MARK: Sleep timer
+
+    /// The end of the playing channel's current programme, when the guide has it.
+    var currentProgrammeEnd: Date? {
+        playingChannel.flatMap { nowNext(for: $0)?.now?.end }
+    }
+
+    /// Stops playback (and so closes the connection) after `minutes`; nil turns the timer off.
+    func setSleepTimer(_ minutes: Int?) {
+        sleepTask?.cancel()
+        sleepTask = nil
+        sleepAt = nil
+        guard let minutes else { return }
+        scheduleSleep(at: .now.addingTimeInterval(Double(minutes) * 60))
+    }
+
+    func sleepAtEndOfProgramme() {
+        guard let end = currentProgrammeEnd else { return }
+        setSleepTimer(nil)
+        scheduleSleep(at: end)
+    }
+
+    private func scheduleSleep(at date: Date) {
+        sleepAt = date
+        sleepTask = Task {
+            // The default clock keeps counting while the Mac sleeps, so a deadline missed then fires on wake.
+            try? await Task.sleep(for: .seconds(date.timeIntervalSinceNow))
+            guard !Task.isCancelled else { return }
+            stop()
+        }
     }
 
     /// mpv only says "loading failed", so ask the provider what went wrong. Runs after the failed

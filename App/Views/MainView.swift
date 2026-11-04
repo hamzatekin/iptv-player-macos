@@ -9,6 +9,7 @@ import SwiftUI
 /// so mpv's view is never moved.
 struct MainView: View {
     @Environment(AppModel.self) private var model
+    @State private var showsAccount = false
 
     var body: some View {
         ZStack {
@@ -25,7 +26,20 @@ struct MainView: View {
                         .frame(minWidth: 320, minHeight: 180)
                         .anchorPreference(key: PlayerFrameKey.self, value: .bounds) { $0 }
                 }
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button {
+                            showsAccount = true
+                        } label: {
+                            Label("Account", systemImage: "person.crop.circle")
+                        }
+                        .help("Account and login")
+                    }
+                }
             }
+        }
+        .sheet(isPresented: $showsAccount) {
+            AccountSheet().environment(model)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .overlayPreferenceValue(PlayerFrameKey.self) { anchor in

@@ -11,39 +11,51 @@ Makefile                 make build | make test | make run
 App/                     SwiftUI app target (Swift 5 language mode)
   IPTVPlayerApp.swift    @main, scenes
   AppIcon.icon           App icon, an Icon Composer document (open it in Xcode's Icon Composer)
-  Player/                MPVPlayer (the one mpv instance), MPVVideoView, PlayerView
+  Player/                MPVPlayer (the one mpv instance), MPVVideoView, PlayerView, NowPlaying (media keys,
+                         Control Center)
   Model/                 AppModel (app state), AppSettings (user agent)
   Views/                 SwiftUI screens
 Packages/IPTVCore/       Swift package, no UI (Swift 6 language mode)
   Sources/IPTVCore/      Models, XtreamClient, ChannelGrouping, Stores (cache, favorites, Keychain),
-                         PlaybackDiagnosis + ProviderProblem + Reachability (why a stream failed), LogRedaction
+                         PlaybackDiagnosis + ProviderProblem + Reachability (why a stream failed),
+                         ReconnectPolicy, MediaTracks (audio/subtitle tracks, stream info), LogRedaction
   Tests/IPTVCoreTests/   Swift Testing tests, JSON fixtures in Fixtures/
 ```
 
 ## Commands
 
 - `make test`: core package tests (`swift test`). Fast, no network.
-- `make build`: generates the Xcode project and builds the app. First build downloads MPVKit.
+- `make build`: generates the Xcode project and builds the app. First build downloads MPVKit. Then
+  `scripts/sign.sh` re-signs it with the Keychain's Apple Development certificate, if there is one.
 - `make run`: builds, launches the app fresh (`open -F`) and follows its log in `$TMPDIR/iptvplayer-run.log`.
-  Reads `.env` (gitignored) for `IPTV_SERVER`, `IPTV_USERNAME`, `IPTV_PASSWORD`, and `IPTV_MPV_LOG`
+  Reads `.env` (gitignored) for `IPTV_SERVER`, `IPTV_USERNAME`, `IPTV_PASSWORD` (used only while no login
+  is saved in the Keychain), and `IPTV_MPV_LOG`
   (mpv log level, e.g. `v`). Debug builds also read `IPTV_DEBUG_PLAY_URL`: a stream to play at launch
   (e.g. Apple's public HLS test stream), for checking player changes without the provider's one
-  connection. Don't launch the binary directly: after a force quit, window
+  connection. `IPTV_TEST_INSTANCE=1` makes a debug copy sign in from `.env` only and never touch the
+  Keychain (reading a login another build saved can bring up a Keychain password prompt). Don't launch the binary directly: after a force quit, window
   restoration can bring back zero windows.
 
 ## How it works
 
-1. On launch the app loads the login from the Keychain (debug builds: `.env` variables win).
+1. On launch the app loads the login from the Keychain (debug builds fall back to `.env` when it is
+   empty). The toolbar's account button (`AccountSheet`) shows the login and edits it: the server must
+   accept the new login before it is saved, and a new server or username reloads the channels.
 2. It shows the cached catalog from disk at once, and refreshes it from the server when older than 24h.
 3. `ChannelGrouping` merges streams like "TRT 1 HD" and "TRT 1 FHD" into one channel with variants,
    and hides heading rows like "∞∞∞ TURK ULUSAL ∞∞∞".
 4. Playing a channel hands `XtreamClient.liveStreamURL` to `MPVPlayer.play`, which replaces the
-   current stream. mpv renders into `MPVVideoView`'s Metal layer through MoltenVK.
+   current stream. mpv renders into `MPVVideoView`'s Metal layer through MoltenVK. `aid` and `sid` are
+   passed as per-file options, so an audio or subtitle track picked on one channel doesn't carry over.
 5. Now/next comes from `get_short_epg`, only for channels with an EPG id.
 6. When mpv fails (it only says "loading failed"), `PlaybackDiagnosis.run` asks why: account info,
    one request to the stream URL that refuses the redirect and stops at the headers, and a bare TCP
    connect to the stream server. The resulting `ProviderProblem` is shown in the player. API errors
    use `ProviderProblem(error:)` too. Texts live in `App/Model/ProviderProblemDisplay.swift`.
+7. A stream that had been playing and then fails or ends (a live stream has no end: the server closed
+   it) is opened again by `MPVPlayer.reload` after 2, 5 and 10 seconds (`ReconnectPolicy`), with no
+   connection check: the provider can still count the dropped stream. After that, step 6. A stream
+   that never started is diagnosed at once.
 
 ## Facts about Xtream providers
 
@@ -82,6 +94,11 @@ which is gitignored.
   `c5d391adb`, `3dae21b1e`); drop the option once MPVKit ships an mpv with them.
 - Keep `MPVPlayer` the only thing that talks to libmpv. Keep the `MPVVideoView` instance alive for
   the app's lifetime: mpv is bound to its Metal layer at startup.
+- **The Keychain only keeps the login across rebuilds for Apple-certificate builds.** An ad-hoc build is
+  a new app to the Keychain after every rebuild (the item's partition is its cdhash), so it reads
+  nothing and the login screen comes back; a self-signed certificate doesn't help either. Builds
+  signed by an Apple Development certificate share the team's partition. `scripts/sign.sh` takes the
+  certificate from the Keychain at build time, so no team ID is committed.
 - Core logic goes in `IPTVCore` with tests. The app target holds UI and wiring only.
 - Testing against a real account uses its connection: don't run playback checks while the account
   is in use on another device.

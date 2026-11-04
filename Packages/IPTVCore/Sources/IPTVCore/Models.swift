@@ -11,6 +11,11 @@ public struct XtreamCredentials: Codable, Equatable, Sendable {
         self.username = username
         self.password = password
     }
+
+    /// Same server and username: a new password is still the same account, with the same channels.
+    public func isSameAccount(as other: XtreamCredentials) -> Bool {
+        server == other.server && username == other.username
+    }
 }
 
 /// `user_info` + `server_info` from `player_api.php` with no action.
